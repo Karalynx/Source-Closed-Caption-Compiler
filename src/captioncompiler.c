@@ -202,7 +202,7 @@ static CaptionList* read_captions(const char* filename)
             goto caption_read_error;
     }
 
-    fprintf(stdout, "Found %u entries\n", list->size);
+    fprintf(stdout, "Found %lu entries\n", list->size);
 
     caption_list_sort(list);
     u_fclose(txt_file);

@@ -62,7 +62,7 @@ UString* ustring_init_prealloced(const uint32_t n)
 
 void ustring_shrink_to_fit(UString* str)
 {
-    str->data = (UChar*)realloc(str->data, str->size + 1);
+    str->data = (UChar*)realloc(str->data, (str->size + 1) * sizeof(UChar));
     str->capacity = str->size;
 }
 
@@ -82,7 +82,7 @@ UString* ustring_getline(UFILE* stream)
         ++str->size;
         if(str->size > str->capacity)
         {
-            const int32_t new_capacity = str->capacity << 1;
+            const uint32_t new_capacity = str->capacity << 1;
             UChar* new_data = (UChar*)realloc(str->data, (str->capacity << 1) * sizeof(UChar));
             if(!new_data)
             {

@@ -3,8 +3,6 @@
 
 #include "caption.h"
 
-typedef __SIZE_TYPE__ size_t;
-
 typedef struct _CaptionNode {
     Caption* caption;
     struct _CaptionNode* next;
@@ -13,7 +11,7 @@ typedef struct _CaptionNode {
 typedef struct _CaptionList {
     CaptionNode* head;
     CaptionNode* tail;
-    uint32_t size;
+    uint64_t size;
 } CaptionList;
 
 CaptionList* caption_list_init();
