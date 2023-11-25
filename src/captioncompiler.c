@@ -3,7 +3,7 @@
  * Created:   7/8/2023
  */
 
-#include <stdlib.h>
+#include <ctype.h>
 #include <memory.h>
 #include <errno.h>
 #include "buffer.h"
@@ -23,6 +23,21 @@ typedef struct _Header {
     int32_t dir_size;
     int32_t data_offset;
 } Header;
+
+typedef enum _CompilerFlags {
+    Verbose = 0x01,
+} CompilerFlags;
+
+typedef enum _ParserErrors {
+    ArgCount = 0x01,
+    InvalidArg = 0x02,
+    MissingArg = 0x04,
+} ParserErrors;
+
+typedef struct _ParserErrorData {
+    ParserErrors code;
+    char* argument;
+} ParserErrorData;
 
 Caption* extract_strings(Caption* caption, const UString* line, int8_t* error)
 {
@@ -134,7 +149,7 @@ Caption* parse_caption(const UString* line, int8_t* error)
     return caption;
 }
 
-static CaptionList* read_captions(const char* filename)
+static CaptionList* read_captions(const char* filename, uint8_t flags)
 {
     UFILE* txt_file = NULL;
     CaptionList* list = NULL;
@@ -186,6 +201,9 @@ static CaptionList* read_captions(const char* filename)
         UString* line = ustring_getline(txt_file);
         if(!line)
             goto caption_read_error;
+
+        if(flags & Verbose)
+            u_fprintf(u_get_stdout(), "Parsing line \'%S\'\n", line->data);
         
         Caption* caption = parse_caption(line, &error);
         ustring_destroy(&line);
@@ -202,7 +220,8 @@ static CaptionList* read_captions(const char* filename)
             goto caption_read_error;
     }
 
-    fprintf(stdout, "Found %lu entries\n", list->size);
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Found %lu entries\n\n", list->size);
 
     caption_list_sort(list);
     u_fclose(txt_file);
@@ -214,16 +233,16 @@ static CaptionList* read_captions(const char* filename)
         {
             case EOVERFLOW:
                 fprintf(stderr, "An error occured while reading file '%s': Value at line %u exceeds maximum length of %u\n", filename, line_count, (BLOCK_SIZE >> 1) - 1);
-            break;
+                break;
             case ENODATA:
                 fprintf(stderr, "An error occured while reading file '%s': Could not find token declaration\n", filename);
-            break;
+                break;
             case EINVAL:
                 fprintf(stderr, "An error occured while reading file '%s': Line %u has a key of length 0\n", filename, line_count);
-            break;
+                break;
             default:
                 fprintf(stderr, "An error occured while reading file '%s': %s\n", filename, strerror(errno));
-            break;
+                break;
         }
 
         if(txt_file)
@@ -238,7 +257,7 @@ static CaptionList* read_captions(const char* filename)
     return list;
 };
 
-static int8_t compile(CaptionList* captions, const char* filepath)
+static int8_t compile(CaptionList* captions, const char* filepath, uint8_t flags)
 {
     FILE* out_file = NULL;
     Buffer* caption_buffer = NULL;
@@ -256,6 +275,9 @@ static int8_t compile(CaptionList* captions, const char* filepath)
     header.block_size = BLOCK_SIZE;
     header.dir_size = captions->size;
     header.data_offset = HEADER_SIZE + captions->size * DIR_ENTRY_SIZE + dict_padding;
+    
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Writing VPK Header\nVCCD: %d\nVersion: %d\nBlock Count: %d\nBlock Size: %d\nDIR Size: %d\nData Offset: %d\n\n", header.vccd, header.version, header.block_count, header.block_size, header.dir_size, header.data_offset);
     
     fwrite(&header, HEADER_SIZE, 1, out_file);
 
@@ -280,6 +302,9 @@ static int8_t compile(CaptionList* captions, const char* filepath)
             expected_buffer_size += leftover;
             current_offset = 0;
         }
+
+        if(flags & Verbose)
+            u_fprintf(u_get_stdout(), "Writing Caption data for \'%S\'\nHash: %u\nBlock: %d\nOffset: %hd\nLength: %hd\n\n", caption->value->data, caption->hash, header.block_count, current_offset, length_bytes);
         
         // Directory entry
         fwrite(&caption->hash, sizeof(uint32_t), 1, out_file);
@@ -299,9 +324,15 @@ static int8_t compile(CaptionList* captions, const char* filepath)
     buffer_dup(caption_buffer, 0, leftover);
     expected_buffer_size += leftover;
 
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Padding Dictionary with %d zeroes\n\n", dict_padding);
+
     // Pad dictionary with 0
     while(--dict_padding >= 0)
         fputc(0, out_file);
+
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Writing caption strings of length %u\n", caption_buffer->size);
 
     // Write caption buffer
     fwrite(caption_buffer->data, sizeof(char), caption_buffer->size, out_file);
@@ -315,12 +346,18 @@ static int8_t compile(CaptionList* captions, const char* filepath)
     
     // Go back to header and write the number of blocks
     ++header.block_count;
+
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Updating Block Size from 0 to %d\n\n", header.block_count);
+
     fseek(out_file, 2 * sizeof(int32_t), SEEK_SET);
     fwrite(&header.block_count, sizeof(int32_t), 1, out_file);
     
     fclose(out_file);
 
-    fprintf(stdout, "Successfully compiled to '%s'\n", filepath);
+    if(flags & Verbose)
+        u_fprintf(u_get_stdout(), "Successfully compiled to '%s'\n", filepath);
+
     goto caption_compile_success;
 
     caption_compile_error:
@@ -343,41 +380,111 @@ static int8_t compile(CaptionList* captions, const char* filepath)
     return 1;
 }
 
+
 int main(int argc, char** argv)
 {
     const char help_message[] = "Usage: ./Main [source].txt\n\
         \nExample: ./Main closecaption_english.txt";
 
-    if(argc != 2 || (argv[1][0] == '-' && (argv[1][1] == 'h' || argv[1][1] == 'H') && argv[1][2] == '\0'))
+    const char* src_filepath = "";
+    uint8_t flags = 0;
+
+    ParserErrorData error_data = {ArgCount, ""};
+    int i = 1;
+
+    if(argc < 2)
+        goto PRINT_HELP;
+
+    while(i < argc)
+    {
+        if(argv[i][0] != '-')
+        {
+            if(i == argc - 1)
+            {
+                src_filepath = argv[i];
+                goto VALID_ARGS;
+            }
+
+            error_data = (ParserErrorData){InvalidArg, argv[i]};
+            goto PARSER_ERROR;
+        }
+
+        switch (tolower(argv[i][1])) 
+        {
+            case '\0':
+            {
+                error_data = (ParserErrorData){InvalidArg, argv[i]};
+                goto PARSER_ERROR;
+            }
+            case 'h':
+                goto PRINT_HELP;
+            case 'v':
+                flags |= Verbose;
+                break;
+        }
+
+        if(argv[i][2] != '\0')
+        {
+            error_data = (ParserErrorData){InvalidArg, argv[i]};
+            goto PARSER_ERROR;
+        }
+
+        ++i;
+    }
+
+    goto VALID_ARGS;
+
+    PRINT_HELP:
     {
         fprintf(stdout, "%s\n", help_message);
         return 0;
     }
 
-    const char* src_filepath = argv[1];
-    const uint32_t src_length = strlen(src_filepath);
-    if(src_length < 4 || memcmp(src_filepath + (src_length - 4), ".txt", 4) != 0)
+    PARSER_ERROR:
     {
-        fprintf(stderr, "Only .txt files are accepted.\n");
-        return -1;
+        switch (error_data.code) 
+        {
+            case ArgCount:
+                fprintf(stderr, "Must specify VPK Archive directory\n");
+                return 1;
+            case InvalidArg:
+                fprintf(stderr, "Invalid argument \'%s\'\n", error_data.argument);
+                return 1;
+            case MissingArg:
+                fprintf(stderr, "Missing argument(s) for \'%s\'\n", error_data.argument);
+                return 1;
+            default:
+                fprintf(stderr, "An error occured during parsing\n");
+                return 1;
+        }
     }
 
-    char out_filepath[src_length + 1];
-    memcpy(out_filepath, src_filepath, src_length - 4);
-    memcpy(out_filepath + (src_length - 4), ".dat", 5);
-
-
-    CaptionList* list = read_captions(src_filepath);
-    if(!list)
-        return -1;
-
-    if(!compile(list, out_filepath))
+    VALID_ARGS:
     {
+        const uint32_t src_length = strlen(src_filepath);
+        if(src_length < 4 || memcmp(src_filepath + (src_length - 4), ".txt", 4) != 0)
+        {
+            fprintf(stderr, "Only .txt files are accepted.\n");
+            return -1;
+        }
+
+        char out_filepath[src_length + 1];
+        memcpy(out_filepath, src_filepath, src_length - 4);
+        memcpy(out_filepath + (src_length - 4), ".dat", 5);
+
+
+        CaptionList* list = read_captions(src_filepath, flags);
+        if(!list)
+            return -1;
+
+        if(!compile(list, out_filepath, flags))
+        {
+            caption_list_destroy(&list);
+            return -1;
+        }
+
         caption_list_destroy(&list);
-        return -1;
     }
-
-    caption_list_destroy(&list);
 
     return 0;
 }
